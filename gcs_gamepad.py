@@ -11,14 +11,13 @@ Dependencies:
 Usage:
     python gcs_gamepad.py [--host <vehicle_ip>] [--port <port>]
 
-Controls (default Xbox/PS layout):
-    Left  Stick X-axis  → Steering  (CH1)
-    Right Stick Y-axis  → Throttle  (CH3)
-    Right Trigger (RT)  → Forward throttle (alternative)
-    Left  Trigger (LT)  → Reverse  throttle (alternative)
-    Start / Options     → Arm / enable control
-    Back  / Share       → Disarm / neutral/stop
-    B / Circle          → Emergency STOP (immediate neutral)
+Controls (default gamepad layout):
+    Steering: Left Stick
+    Forward: Right Trigger
+    Reverse/Brake: Left Trigger
+    Arm/Start: Right Shoulder Button
+    Disarm/Stop: Left Shoulder Button
+    Emergency Stop: B
 """
 
 import sys
@@ -34,35 +33,30 @@ from pymavlink import mavutil
 DEFAULT_HOST        = "127.0.0.1"   # Vehicle IP (through WFB-NG relay)
 DEFAULT_PORT        = 14550          # GCS-side WFB-NG port
 HEARTBEAT_INTERVAL  = 1.0           # seconds between heartbeats
-RC_SEND_INTERVAL    = 0.05          # seconds between RC overrides (20 Hz)
+RC_SEND_INTERVAL    = 0.015625      # seconds between RC overrides (64 Hz)
 RC_TIMEOUT          = 0.5           # seconds without input → send neutral
 SYSTEM_ID           = 255           # GCS MAVLink system ID
 
 # PWM range
-PWM_MIN     = 1000
-PWM_CENTER  = 1500
-PWM_MAX     = 2000
+MAV_MIN     = 1000
+MAV_CENTRE  = 1500
+MAV_MAX     = 2000
 
 # Deadzone for analog sticks (0.0 – 1.0)
 STICK_DEADZONE = 0.08
 
-# Throttle mode: "stick" (right stick Y) or "trigger" (LT/RT)
-THROTTLE_MODE = "trigger"
-
 # Expo curve factor (0.0 = linear, 1.0 = full cubic expo)
-STEERING_EXPO  = 0.30
-THROTTLE_EXPO  = 0.20
+STEERING_EXPO  = 0.0
+THROTTLE_EXPO  = 0.0
 
-# Axis / button indices — tuned for Xbox 360 / Xbox One USB
-# Adjust for your controller using --calibrate flag
+# Axis / button indices
 AXIS_STEER    = 0   # Left stick X
-AXIS_THROTTLE = 4   # Right stick Y (stick mode)
-AXIS_RT       = 5   # Right trigger  (trigger mode, forward)
-AXIS_LT       = 2   # Left trigger   (trigger mode, reverse)
+AXIS_FORWARD       = 4   # Right trigger  (trigger mode, forward)
+AXIS_REVERSE       = 5   # Left trigger   (trigger mode, reverse)
 
-BTN_ARM       = 7   # Start / Options
-BTN_DISARM    = 6   # Back / Share
-BTN_ESTOP     = 1   # B / Circle
+BTN_ARM       = 7   # Right Shoulder
+BTN_DISARM    = 6   # Left Shoulder
+BTN_ESTOP     = 1   # B
 
 # ─── ANSI colour helpers ──────────────────────────────────────────────────────
 
@@ -90,19 +84,19 @@ def apply_expo(value: float, expo: float) -> float:
     """Blend linear and cubic response. expo=0 → linear, expo=1 → full cubic."""
     return expo * (value ** 3) + (1.0 - expo) * value
 
-def axis_to_pwm(value: float, deadzone: float = STICK_DEADZONE,
+def axis_to_mav(value: float, deadzone: float = STICK_DEADZONE,
                 expo: float = 0.0, invert: bool = False) -> int:
-    """Convert a normalised axis value (-1..+1) to a PWM microsecond value."""
+    """Convert a normalised axis value (-1..+1) to a mavlink value."""
     v = apply_deadzone(value, deadzone)
     v = apply_expo(v, expo)
     if invert:
         v = -v
-    pwm = int(PWM_CENTER + v * (PWM_MAX - PWM_CENTER))
-    return max(PWM_MIN, min(PWM_MAX, pwm))
+    mav = int(MAV_CENTRE + v * (MAV_MAX - MAV_CENTRE))
+    return max(MAV_MIN, min(MAV_MAX, mav))
 
-def trigger_to_pwm(forward: float, reverse: float, expo: float = 0.0) -> int:
+def trigger_to_mav(forward: float, reverse: float, expo: float = 0.0) -> int:
     """
-    Convert two trigger axes (each 0..1 after normalisation) to a throttle PWM.
+    Convert two trigger axes (each 0..1 after normalisation) to a mavlink value.
     Forward  → above centre (1500–2000)
     Reverse  → below centre (1000–1500)
     """
@@ -111,12 +105,12 @@ def trigger_to_pwm(forward: float, reverse: float, expo: float = 0.0) -> int:
     # Net value in -1..+1 (forward positive)
     net = fwd - rev
     net = apply_expo(net, expo)
-    pwm = int(PWM_CENTER + net * (PWM_MAX - PWM_CENTER))
-    return max(PWM_MIN, min(PWM_MAX, pwm))
+    mav = int(MAV_CENTRE + net * (MAV_MAX - MAV_CENTRE))
+    return max(MAV_MIN, min(MAV_MAX, mav))
 
-def pwm_bar(pwm: int, width: int = 20) -> str:
-    """Render a visual bar for a PWM value."""
-    ratio = (pwm - PWM_MIN) / (PWM_MAX - PWM_MIN)
+def mav_bar(pwm: int, width: int = 20) -> str:
+    """Render a visual bar for a MavLink value."""
+    ratio = (pwm - MAV_MIN) / (MAV_MAX - MAV_MIN)
     filled = int(ratio * width)
     bar = "█" * filled + "░" * (width - filled)
     return f"[{bar}]"
@@ -125,8 +119,8 @@ def pwm_bar(pwm: int, width: int = 20) -> str:
 
 class ControllerState:
     def __init__(self):
-        self.steering_pwm  = PWM_CENTER
-        self.throttle_pwm  = PWM_CENTER
+        self.steering_mav  = MAV_CENTRE
+        self.throttle_mav  = MAV_CENTRE
         self.armed         = False
         self.estop         = False
         self.last_input_ts = time.time()
@@ -134,8 +128,8 @@ class ControllerState:
 
     def safe_neutral(self):
         with self.lock:
-            self.steering_pwm = PWM_CENTER
-            self.throttle_pwm = PWM_CENTER
+            self.steering_mav = MAV_CENTRE
+            self.throttle_mav = MAV_CENTRE
 
 # ─── MAVLink sender thread ────────────────────────────────────────────────────
 
@@ -186,36 +180,36 @@ class MAVLinkSender(threading.Thread):
 
     def run(self):
         self.connect()
-        last_hb = 0.0
+        last_heartbeat = 0.0
 
         while not self._stop_event.is_set():
             now = time.time()
 
             # Heartbeat at 1 Hz
-            if now - last_hb >= HEARTBEAT_INTERVAL:
+            if now - last_heartbeat >= HEARTBEAT_INTERVAL:
                 try:
                     self.send_heartbeat()
                 except Exception as e:
                     print(clr(f"\n  Heartbeat error: {e}", RED))
-                last_hb = now
+                last_heartbeat = now
 
             # RC override at 20 Hz
             with self.state.lock:
                 armed   = self.state.armed
                 estop   = self.state.estop
-                steer   = self.state.steering_pwm
-                thr     = self.state.throttle_pwm
+                steer   = self.state.steering_mav
+                thr     = self.state.throttle_mav
                 last_in = self.state.last_input_ts
 
             # RC timeout watchdog → neutral
             # (not applied in no_arm mode — operator has accepted the risk)
             if armed and not self.no_arm and (now - last_in > RC_TIMEOUT):
-                steer = PWM_CENTER
-                thr   = PWM_CENTER
+                steer = MAV_CENTRE
+                thr   = MAV_CENTRE
 
             if estop or not armed:
-                steer = PWM_CENTER
-                thr   = PWM_CENTER
+                steer = MAV_CENTRE
+                thr   = MAV_CENTRE
 
             try:
                 self.send_rc_override(steer, thr)
@@ -229,7 +223,7 @@ class MAVLinkSender(threading.Thread):
         # Send one final neutral before exit
         if self.mav:
             try:
-                self.send_rc_override(PWM_CENTER, PWM_CENTER)
+                self.send_rc_override(MAV_CENTRE, MAV_CENTRE)
             except Exception:
                 pass
 
@@ -274,8 +268,8 @@ def run_calibration():
 
 def render_hud(state: ControllerState, js_name: str, conn_str: str, no_arm: bool = False):
     with state.lock:
-        steer  = state.steering_pwm
-        thr    = state.throttle_pwm
+        steer  = state.steering_mav
+        thr    = state.throttle_mav
         armed  = state.armed
         estop  = state.estop
 
@@ -297,14 +291,12 @@ def render_hud(state: ControllerState, js_name: str, conn_str: str, no_arm: bool
         f"  {clr('Gamepad :', GREY)} {clr(js_name, WHITE)}",
         f"  {clr('Status  :', GREY)} {status}",
         "",
-        f"  {clr('Steering ', GREY)}CH1  {clr(f'{steer:4d}µs', YELLOW)}  {pwm_bar(steer)}",
-        f"  {clr('Throttle ', GREY)}CH3  {clr(f'{thr:4d}µs',   YELLOW)}  {pwm_bar(thr)}",
+        f"  {clr('Steering ', GREY)}CH1  {clr(f'{steer:4d}µs', YELLOW)}  {mav_bar(steer)}",
+        f"  {clr('Throttle ', GREY)}CH3  {clr(f'{thr:4d}µs',   YELLOW)}  {mav_bar(thr)}",
         "",
         clr("  Controls:", GREY),
         clr("   Left stick X          → Steering", GREY),
-        clr("   LT (reverse) / RT (forward) → Throttle", GREY)
-        if THROTTLE_MODE == "trigger" else
-        clr("   Right stick Y (↑=fwd) → Throttle", GREY),
+        clr("   LT (reverse) / RT (forward) → Throttle", GREY),
         clr("   START / Options       → Arm", GREY),
         clr("   BACK  / Share         → Disarm", GREY),
         clr("   B / Circle            → Emergency STOP", GREY),
@@ -324,14 +316,8 @@ def main():
     parser.add_argument("--host",      default=DEFAULT_HOST, help="Vehicle IP or hostname")
     parser.add_argument("--port",      default=DEFAULT_PORT, type=int, help="UDP port")
     parser.add_argument("--calibrate", action="store_true",  help="Run axis/button calibration tool")
-    parser.add_argument("--trigger",   action="store_true",  help="Use triggers for throttle (default)")
-    parser.add_argument("--stick",     action="store_true",  help="Use right stick Y for throttle")
     parser.add_argument("--no-arm",    action="store_true",  help="Skip arm requirement (bench testing only — sticks live immediately)")
     args = parser.parse_args()
-
-    global THROTTLE_MODE
-    if args.stick:
-        THROTTLE_MODE = "stick"
 
     no_arm = args.no_arm
 
@@ -353,9 +339,6 @@ def main():
     print(clr(f"\n  Gamepad detected: {js_name}", GREEN))
     print(clr(f"  Axes: {js.get_numaxes()}   Buttons: {js.get_numbuttons()}\n", GREY))
 
-    # ── FIX: use udpout: — this makes pymavlink an active sender (client).
-    #         The original "udp:" prefix binds a listening socket instead,
-    #         so packets were never transmitted to WFB-NG.
     conn_str = f"udpout:{args.host}:{args.port}"
 
     # ── State & sender ───────────────────────────────────────────────────────
@@ -392,8 +375,8 @@ def main():
                     with state.lock:
                         state.estop    = True
                         state.armed    = False
-                        state.steering_pwm = PWM_CENTER
-                        state.throttle_pwm = PWM_CENTER
+                        state.steering_mav = MAV_CENTRE
+                        state.throttle_mav = MAV_CENTRE
                     print(clr("\n  ⚠  EMERGENCY STOP", RED, BOLD))
 
                 elif event.button == BTN_ARM:
@@ -405,38 +388,31 @@ def main():
                     with state.lock:
                         state.armed = False
                         state.estop = False
-                        state.steering_pwm = PWM_CENTER
-                        state.throttle_pwm = PWM_CENTER
+                        state.steering_mav = MAV_CENTRE
+                        state.throttle_mav = MAV_CENTRE
 
         # ── Read axes ────────────────────────────────────────────────────────
         pygame.event.pump()
 
-        raw_steer = js.get_axis(AXIS_STEER) if js.get_numaxes() > AXIS_STEER else 0.0
+        raw_steer = js.get_axis(AXIS_STEER) if js.get_numaxes() >= AXIS_STEER else 0.0
 
-        if THROTTLE_MODE == "trigger":
-            # Triggers typically report -1 (released) to +1 (fully pressed)
-            # Normalise to 0..1
-            raw_rt = js.get_axis(AXIS_RT) if js.get_numaxes() > AXIS_RT else -1.0
-            raw_lt = js.get_axis(AXIS_LT) if js.get_numaxes() > AXIS_LT else -1.0
-            fwd = (raw_rt + 1.0) / 2.0   # 0 (released) → 1 (floored)
-            rev = (raw_lt + 1.0) / 2.0
-            thr_pwm = trigger_to_pwm(fwd, rev, expo=THROTTLE_EXPO)
-        else:
-            # Right stick Y: up = -1 (forward), down = +1 (backward) — invert
-            raw_thr = js.get_axis(AXIS_THROTTLE) if js.get_numaxes() > AXIS_THROTTLE else 0.0
-            thr_pwm = axis_to_pwm(raw_thr, expo=THROTTLE_EXPO, invert=True)
+        # Triggers typically report -1 (released) to +1 (fully pressed)
+        # Normalise to 0..1
+        raw_rt = js.get_axis(AXIS_FORWARD) if js.get_numaxes() >= AXIS_FORWARD else -1.0
+        raw_lt = js.get_axis(AXIS_REVERSE) if js.get_numaxes() >= AXIS_REVERSE else -1.0
+        fwd = (raw_rt + 1.0) / 2.0   # 0 (released) → 1 (floored)
+        rev = (raw_lt + 1.0) / 2.0
+        thr_mav = trigger_to_mav(fwd, rev, expo=THROTTLE_EXPO)
 
-        steer_pwm = axis_to_pwm(raw_steer, expo=STEERING_EXPO)
+        steer_mav = axis_to_mav(raw_steer, expo=STEERING_EXPO)
 
         with state.lock:
-            state.steering_pwm = steer_pwm
-            state.throttle_pwm = thr_pwm
-            # Bug fix: only refresh the watchdog timestamp when the operator is
-            # actively giving a non-neutral input.  Updating unconditionally
-            # every loop iteration meant the RC-timeout safety net never fired.
+            state.steering_mav = steer_mav
+            state.throttle_mav = thr_mav
+
             stick_active = (
                 abs(apply_deadzone(raw_steer, STICK_DEADZONE)) > 0
-                or thr_pwm != PWM_CENTER
+                or thr_mav != MAV_CENTRE
             )
             if stick_active:
                 state.last_input_ts = time.time()
@@ -444,7 +420,7 @@ def main():
         # ── Refresh HUD ──────────────────────────────────────────────────────
         render_hud(state, js_name, conn_str, no_arm=no_arm)
 
-        clock.tick(30)  # 30 fps UI refresh
+        clock.tick(60)  # 60 fps UI refresh
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
 
