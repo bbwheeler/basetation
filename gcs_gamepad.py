@@ -46,8 +46,8 @@ MAV_MAX     = 2000
 STICK_DEADZONE = 0.08
 
 # Expo curve factor (0.0 = linear, 1.0 = full cubic expo)
-STEERING_EXPO  = 0.0
-THROTTLE_EXPO  = 0.0
+STEERING_EXPO  = 0.5
+THROTTLE_EXPO  = 0.5
 
 # Axis / button indices
 AXIS_STEER    = 0   # Left stick X
