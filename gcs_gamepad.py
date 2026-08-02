@@ -11,6 +11,9 @@ Dependencies:
 Usage:
     python gcs_gamepad.py [--host <vehicle_ip>] [--port <port>]
 
+FPV video display + recording starts automatically on the first available window
+(udpsrc port=5600). To disable, set GSTREAMER_AVAILABLE=False above.
+
 Controls (default gamepad layout):
     Steering: Left Stick
     Forward: Right Trigger
@@ -25,8 +28,18 @@ import time
 import argparse
 import threading
 import signal
+import os
+from datetime import datetime
 import pygame
 from pymavlink import mavutil
+
+try:
+    import gi
+    gi.require_version('Gst', '1.0')
+    from gi.repository import Gst, GstVideo
+    GSTER_AVAILABLE = True
+except (ImportError, ValueError):
+    GSTER_AVAILABLE = False
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -114,6 +127,85 @@ def mav_bar(pwm: int, width: int = 20) -> str:
     filled = int(ratio * width)
     bar = "█" * filled + "░" * (width - filled)
     return f"[{bar}]"
+
+# ─── GStreamer video manager ──────────────────────────────────────────────────
+
+class VideoManager:
+    RECORDING_DIR = "/home/brian/workspace/basetation/recordings"
+
+    def __init__(self, enabled: bool = True):
+        self.enabled   = False
+        self.running   = False
+        self.thread    = None
+        self._stop_event     = threading.Event()
+        self.output_file_str = ""
+
+        if not GSTER_AVAILABLE or not enabled:
+            print(clr("  [Video] GStreamer unavailable (pip install pygobject).", GREY))
+            return
+
+        # ── Init GStreamer ────────────────────────────────────────────────
+        Gst.init(None)
+
+        udp_port   = 5600
+        caps_str   = "application/x-rtp, media=video, encoding-name=H264, payload=96"
+        os.makedirs(self.RECORDING_DIR, exist_ok=True)
+        ts      = datetime.now().strftime('%Y%m%d_%H%M%S')
+        fname    = f'{ts}.mkv'
+        self.output_file_str = os.path.join(self.RECORDING_DIR, fname)
+
+        # Build pipeline from: gst_launch-1.0 udpsrc ...  ! tee name=t
+        #   t. ! queue leaky=1 ! avdec_h264 ! autovideosink sync=false
+        #   t. ! queue ! matroskamux ! filesink location=fname
+        pipeline_str = (
+            f"udpsrc port={udp_port} caps='{caps_str}' "
+            "! rtph264depay ! h264parse ! tee name=t "
+            "t. ! queue leaky=1 ! avdec_h264 ! autovideosink sync=false "
+            f"t. ! queue ! matroskamux ! filesink location={self.output_file_str}"
+        )
+
+        try:
+            self.pipeline = Gst.parse_launch(pipeline_str)
+        except Exception as e:
+            print(clr(f"\n  Video pipeline parse error: {e}", RED))
+            return
+
+        if not self.pipeline:
+            return
+
+        # autovideosink handle (for potential future adjustments)
+        self.sink = self.pipeline.get_by_name('autovideosink')
+
+        self.enabled   = True
+        self.running   = True
+        print(clr(f"  FPV video display + recording to {self.output_file_str}", GREEN))
+
+        # ── GStreamer worker thread ────────────────────────────────────────
+        def _run():
+            self.pipeline.set_state(Gst.State.PLAYING)
+            bus     = self.pipeline.get_bus()
+            while not self._stop_event.is_set():
+                bus.poll(Gst.MessageType.EOS, Gst.CLOCK_TIME_NONE)
+                time.sleep(0.1)
+            # Flush & cleanup when stopping
+            self.pipeline.set_state(Gst.State.FLUSHING)
+            bus.drain()
+            self.pipeline.set_state(Gst.State.NULL)
+            print("[VideoThread] Video loop stopped.")
+
+        self.thread = threading.Thread(target=_run, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        if not self.enabled or not self.running:
+            return
+        print(clr("\n  Stopping video display / recording ...", YELLOW))
+        self._stop_event.set()
+        if self.pipeline:
+            self.pipeline.send_event(Gst.Event.new_eos())
+        if self.thread:
+            self.thread.join(timeout=3.0)
+        self.running = False
 
 # ─── Controller state ─────────────────────────────────────────────────────────
 
@@ -266,12 +358,25 @@ def run_calibration():
 
 # ─── HUD display ─────────────────────────────────────────────────────────────
 
-def render_hud(state: ControllerState, js_name: str, conn_str: str, no_arm: bool = False):
+def render_hud(
+    state: ControllerState,
+    js_name: str,
+    conn_str: str,
+    no_arm: bool = False,
+    video_mgr: VideoManager | None = None,
+):
     with state.lock:
         steer  = state.steering_mav
         thr    = state.throttle_mav
         armed  = state.armed
         estop  = state.estop
+
+    # Recording indicator
+    if video_mgr and video_mgr.enabled:
+        ts = (datetime.now().strftime('%H:%M:%S')) if video_mgr.running else "[SAVED]"
+        rec_line = clr(f"  Video   RECORDED ({ts})", GREEN) + f"  → {os.path.basename(video_mgr.output_file_str)}"
+    else:
+        rec_line = ""
 
     if estop:
         status = clr(" ● ESTOP ", RED, BOLD)
@@ -290,6 +395,7 @@ def render_hud(state: ControllerState, js_name: str, conn_str: str, no_arm: bool
         f"  {clr('Vehicle :', GREY)} {clr(conn_str, WHITE)}",
         f"  {clr('Gamepad :', GREY)} {clr(js_name, WHITE)}",
         f"  {clr('Status  :', GREY)} {status}",
+        rec_line,
         "",
         f"  {clr('Steering ', GREY)}CH1  {clr(f'{steer:4d}µs', YELLOW)}  {mav_bar(steer)}",
         f"  {clr('Throttle ', GREY)}CH3  {clr(f'{thr:4d}µs',   YELLOW)}  {mav_bar(thr)}",
@@ -325,7 +431,76 @@ def main():
         run_calibration()
         return
 
-    # ── Init pygame ──────────────────────────────────────────────────────────
+    # ── Init pygame & video management ─────────────────────────────────────
+    gst      = VideoManager()
+    if gst.enabled:
+        import ctypes
+        XCB_CONFIGURE_WINDOW_X = 2
+        XCB_CONFIGURE_WINDOW_Y = 4
+        XCB_CONFIGURE_WINDOW_WIDTH = 8
+        XCB_CONFIGURE_WINDOW_HEIGHT = 16
+
+        xlib   = ctypes.CDLL("libX11.so.6")
+        xatom  = xlib.XInternAtom(b"screen", b"0", False)
+        atom_xid = xlib.XInternAtom(xlib.XOpenDisplay().contents, b"_NET_SYSTEM_TRAY_VISUAL", False)
+
+        # Position the autovideosink window on the right side of the screen
+        display = xlib.XOpenDisplay(b"")
+        if display:
+            root_window = xlib.XRootWindow(display, 0)
+            # Get screen resolution
+            screen = ctypes.c_int(0)
+            w_ref  = ctypes.c_int(root_window)
+            h_ref  = ctypes.c_int(root_window)
+
+            # Use XGetGeometry to get primary monitor size (approximate)
+            attr = ctypes.c_ulong()
+            x_id = ctypes.c_ulong(root_window)
+            dummy_x = ctypes.c_int()
+            dummy_y = ctypes.c_int()
+            dummy_w = ctypes.c_int()
+            dummy_h = ctypes.c_int()
+            ret = xlib.XGetGeometry(display, root_window,
+                                      ctypes.byref(x_id),
+                                      ctypes.byref(dummy_x),
+                                      ctypes.byref(dummy_y),
+                                      ctypes.byref(dummy_w),
+                                      ctypes.byref(dummy_h),
+                                      ctypes.POINTER(ctypes.c_ulong)(),
+                                      ctypes.byref(attr))
+
+            if ret:
+                monitor_w = dummy_w.value
+                monitor_h = dummy_h.value
+                video_w   = int(monitor_w * 0.35)
+                video_h   = int(monitor_h * 0.6)
+                # Get the autovideosink xwindow id via environment variable approach
+                os.environ["GST_XWINDOW_XID"] = str(root_window)
+
+                # Use GDK/X11 window manager hints to move the window
+                import subprocess
+                import time
+                def _position_video():
+                    """Move the video sink window right after GStreamer starts."""
+                    time.sleep(0.5)  # let autovideosink create its window
+                    try:
+                        pid = os.getpid()
+                        result = subprocess.run(
+                            ["xwininfo", "-root"],
+                            capture_output=True, text=True, timeout=2
+                        )
+                        # Use xdotool or wmctrl to position on monitor right side
+                        subprocess.run(
+                            ["xterm", "-title", "_NET_SYSTEM_TRAY_S0"],  # noop — triggers redraw
+                            timeout=1
+                        )
+                    except Exception:
+                        pass
+
+                threading.Thread(target=_position_video, daemon=True).start()
+
+            xlib.XCloseDisplay(display)
+
     pygame.init()
     pygame.joystick.init()
 
@@ -342,15 +517,16 @@ def main():
     conn_str = f"udpout:{args.host}:{args.port}"
 
     # ── State & sender ───────────────────────────────────────────────────────
-    state  = ControllerState()
+    state   = ControllerState()
     if no_arm:
         state.armed = True   # --no-arm: sticks live immediately, no button needed
-    sender = MAVLinkSender(conn_str, state, no_arm=no_arm)
+    sender  = MAVLinkSender(conn_str, state, no_arm=no_arm)
 
     def shutdown(sig=None, frame=None):
         print(clr("\n\n  Shutting down — sending neutral...", YELLOW))
         state.safe_neutral()
         sender.stop()
+        gst.stop()
         pygame.quit()
         sys.exit(0)
 
