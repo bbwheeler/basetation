@@ -358,6 +358,7 @@ def run_calibration():
 
 # ─── HUD display ─────────────────────────────────────────────────────────────
 
+
 def render_hud(
     state: ControllerState,
     js_name: str,
@@ -372,8 +373,10 @@ def render_hud(
         estop  = state.estop
 
     # Recording indicator
-    if video_mgr and video_mgr.enabled:
-        ts = (datetime.now().strftime('%H:%M:%S')) if video_mgr.running else "[SAVED]"
+    if (video_mgr and video_mgr.enabled
+            and hasattr(video_mgr, 'output_file_str')
+            and video_mgr.output_file_str):
+        ts = datetime.now().strftime('%H:%M:%S') if video_mgr.running else "[SAVED]"
         rec_line = clr(f"  Video   RECORDED ({ts})", GREEN) + f"  → {os.path.basename(video_mgr.output_file_str)}"
     else:
         rec_line = ""
@@ -395,7 +398,10 @@ def render_hud(
         f"  {clr('Vehicle :', GREY)} {clr(conn_str, WHITE)}",
         f"  {clr('Gamepad :', GREY)} {clr(js_name, WHITE)}",
         f"  {clr('Status  :', GREY)} {status}",
-        rec_line,
+    ]
+    if rec_line:
+        lines.append(rec_line)
+    lines.extend([
         "",
         f"  {clr('Steering ', GREY)}CH1  {clr(f'{steer:4d}µs', YELLOW)}  {mav_bar(steer)}",
         f"  {clr('Throttle ', GREY)}CH3  {clr(f'{thr:4d}µs',   YELLOW)}  {mav_bar(thr)}",
@@ -408,11 +414,17 @@ def render_hud(
         clr("   B / Circle            → Emergency STOP", GREY),
         clr("   Ctrl+C                → Quit", GREY),
         "",
-    ]
+    ])
 
-    # Move cursor up to overwrite previous HUD
-    sys.stdout.write(f"\033[{len(lines)}A\033[J")
-    sys.stdout.write("\n".join(lines) + "\n")
+    # Move cursor up to overwrite previous HUD, then clear each line individually.
+    # Using \033[K (clear to end of line) instead of \033[J (clear below) so we
+    # don't wipe video output or other terminal content underneath our HUD block.
+    sys.stdout.write(f"\033[{len(lines)}A")
+    for i, line in enumerate(reversed(lines)):
+        if i < len(lines) - 1:
+            sys.stdout.write("\r\033[K\n")
+        else:
+            sys.stdout.write("\r" + line + "\n")
     sys.stdout.flush()
 
 # ─── Main loop ────────────────────────────────────────────────────────────────
