@@ -37,9 +37,9 @@ try:
     import gi
     gi.require_version('Gst', '1.0')
     from gi.repository import Gst, GstVideo
-    GSTER_AVAILABLE = True
+    GSTREAMER_AVAILABLE = True
 except (ImportError, ValueError):
-    GSTER_AVAILABLE = False
+    GSTREAMER_AVAILABLE = False
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -140,7 +140,7 @@ class VideoManager:
         self._stop_event     = threading.Event()
         self.output_file_str = ""
 
-        if not GSTER_AVAILABLE or not enabled:
+        if not GSTREAMER_AVAILABLE or not enabled:
             print(clr("  [Video] GStreamer unavailable (pip install pygobject).", GREY))
             return
 
@@ -185,7 +185,20 @@ class VideoManager:
             self.pipeline.set_state(Gst.State.PLAYING)
             bus     = self.pipeline.get_bus()
             while not self._stop_event.is_set():
-                bus.poll(Gst.MessageType.EOS, Gst.CLOCK_TIME_NONE)
+                msg = bus.timed_pop_wait(Gst.CLOCK_TIME_NONE)
+                if msg is None:
+                    continue
+                if msg.type == Gst.MessageType.EOS:
+                    print(clr("\n  [Video] Feed ended (EOS).", RED))
+                    self._stop_event.set()
+                    break
+                if msg.type == Gst.MessageType.ERROR:
+                    err, debug = msg.parse_error()
+                    print(
+                        clr(f"\n  [Video] Pipeline error: {err} — {debug}", RED)
+                    )
+                    self._stop_event.set()
+                    break
                 time.sleep(0.1)
             # Flush & cleanup when stopping
             self.pipeline.set_state(Gst.State.FLUSHING)
