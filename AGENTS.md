@@ -22,16 +22,17 @@ python gcs_gamepad.py --no-arm           # skip arm requirement (bench testing)
 
 ## Beginning Tasks
 Before you begin, follow these steps:
-1. Make sure all existing changes have been checked in; if there are existing changes, commit them and push them to git.wheeli.ca.
-2. Do a git fetch so that you have all of the latest changes.
-3. Switch to a branch or create a branch appropriate for the changes that you will make
+1. Do a `git fetch` so that you have all of the latest changes.
+2. Make sure all existing changes have been committed to your own branch (branch off `main` if not already on one).
+3. Rebase or merge any incoming changes from `origin/main` into your branch before starting work.
 
-## Finishing Tasks
-Once you complete any changes, additions, deletions, or modifications, follow these steps:
-1. Check the code into a branch using git
-2. Push the code to git.wheeli.ca
-3. Open a Pull Request for the changes you just pushed
-4. Add me (brian) as a reviewer on the Pull Request
+## Finishing Tasks — Always Required
+For **every change** you make (no exceptions), follow these steps in order:
+1. Ensure your local branch has the latest `origin/main`: `git fetch && git rebase origin/main`
+2. Commit your changes on your feature branch with a concise, descriptive message.
+3. Push to remote: `git push origin <your-branch-name>`
+4. Create a PR to merge into `main` using GitLab's API or web UI (the `gh` CLI is not available, and git.wheeli.ca is GitLab).
+5. Add `brian` as a reviewer on the Pull Request.
 
 ## Credentials
 Your credentials for git.wheeli.ca can be found in the parent directory (../credentials.md)
