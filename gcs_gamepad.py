@@ -1,27 +1,9 @@
 #!/usr/bin/env python3
 """
-═══════════════════════════════════════════════════════════════
-  GCS Gamepad Controller — MAVLink RC Override via Gamepad
-  Sends RC_CHANNELS_OVERRIDE to vehicle over UDP (WFB-NG relay)
-═══════════════════════════════════════════════════════════════
-
-Dependencies:
-    pip install pymavlink pygame
-
-Usage:
-    python gcs_gamepad.py [--host <vehicle_ip>] [--port <port>]
-
-FPV video display + recording starts automatically on the first available window
-(udpsrc port=5600). To disable, set GSTREAMER_AVAILABLE=False above.
-
-Controls (default gamepad layout):
-    Steering: Left Stick
-    Forward: Right Trigger
-    Reverse/Brake: Left Trigger
-    Arm/Start: Right Shoulder Button
-    Disarm/Stop: Left Shoulder Button
-    Emergency Stop: B
+GCS Gamepad Controller — MAVLink RC Override via Gamepad
 """
+
+__version__ = "0.1.0"
 
 import sys
 import time
