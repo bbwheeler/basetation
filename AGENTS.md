@@ -20,19 +20,18 @@ python gcs_gamepad.py --no-arm           # skip arm requirement (bench testing)
 - Default PWM range is 1000–2000 µs with centre at 1500 µs.
 - RC overrides sent at 64 Hz; input timeout after 0.5s sends neutral sticks (when armed).
 
-## Beginning Tasks
-Before you begin, follow these steps:
-1. Do a `git fetch` so that you have all of the latest changes.
-2. Make sure all existing changes have been committed to your own branch (branch off `main` if not already on one).
-3. Rebase or merge any incoming changes from `origin/main` into your branch before starting work.
+## Version Control
 
-## Finishing Tasks — Always Required
-For **every change** you make (no exceptions), follow these steps in order:
-1. Ensure your local branch has the latest `origin/main`: `git fetch && git rebase origin/main`
-2. Commit your changes on your feature branch with a concise, descriptive message.
-3. Push to remote: `git push origin <your-branch-name>`
-4. Create a PR to merge into `main` using GitLab's API or web UI (the `gh` CLI is not available, and git.wheeli.ca is GitLab).
-5. Add `brian` as a reviewer on the Pull Request.
+### Submitting Changes
 
-## Credentials
-Your credentials for git.wheeli.ca can be found in the parent directory (../credentials.md)
+All changes, edits, documents, and artifacts must be pushed to the repository when complete. To do so, these steps must be followed:
+1. Commit the code into a branch using git
+2. Push the code to remote origin (git.wheeli.ca)
+3. Open a pull request for the changes you just pushed
+4. Add me (username: brian) as a reviewer on the merge request
+
+### Tools
+
+The Forgeji MCP (command: forgejo_mcp) can be used to execute tasks on git.wheeli.ca such as putting up a PR or MR.
+
+Credentials for the Forgejo instance git.wheeli.ca can be found in the parent directory (../credentials.md)
